@@ -7,19 +7,16 @@ import org.gradle.api.Task
 import org.gradle.api.artifacts.ResolvedArtifact
 import org.gradle.api.artifacts.ResolvedDependency
 import org.gradle.api.internal.artifacts.ResolvableDependency
-import org.gradle.api.internal.tasks.CachingTaskDependencyResolveContext
 import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.MapProperty
 import org.gradle.api.tasks.Copy
 import org.gradle.api.tasks.PathSensitivity
-import org.gradle.api.tasks.TaskDependency
 import org.gradle.api.tasks.TaskProvider
 import org.gradle.api.tasks.bundling.Zip
 
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
-
 /**
  * Core
  * Processor for variant
@@ -184,12 +181,13 @@ class VariantProcessor {
     }
 
     private void processRClasses(RClassesTransform transform, TaskProvider<Task> bundleTask) {
+        if (FatUtils.compareVersion(VersionAdapter.AGPVersion, "8.0.0") >= 0) return
         TaskProvider reBundleTask = configureReBundleAarTask(bundleTask)
-        if (mProject.fataar.transformR && !FatUtils.isAGPVersion8AndAbove()) {
-            TaskProvider transformTask = mProject.tasks.named("transformClassesWith${transform.name.capitalize()}For${mVariant.name.capitalize()}")
-            transformTask.configure {
-                it.dependsOn(mMergeClassTask)
-            }
+        TaskProvider transformTask = mProject.tasks.named("transformClassesWith${transform.name.capitalize()}For${mVariant.name.capitalize()}")
+        transformTask.configure {
+            it.dependsOn(mMergeClassTask)
+        }
+        if (mProject.fataar.transformR) {
             transformRClasses(transform, transformTask, bundleTask, reBundleTask)
         } else {
             generateRClasses(bundleTask, reBundleTask)
@@ -252,14 +250,11 @@ class VariantProcessor {
         }
     }
 
-    // gradle < 6, return TaskDependency
-    // gradle >= 6, return TaskDependencyContainer
-    static def getTaskDependency(ResolvedArtifact artifact) {
+    static def getTaskDependencies(ResolvedArtifact artifact) {
         try {
-            return artifact.buildDependencies
+            return artifact.id.publishArtifact.buildDependencies.getDependencies()
         } catch(MissingPropertyException ignore) {
-            // since gradle 6.8.0, property is changed;
-            return artifact.builtBy
+            return Collections.emptySet()
         }
     }
 
@@ -276,19 +271,8 @@ class VariantProcessor {
             } else if (FatAarPlugin.ARTIFACT_TYPE_AAR == artifact.type) {
                 AndroidArchiveLibrary archiveLibrary = new AndroidArchiveLibrary(mProject, artifact, mVariant.name)
                 addAndroidArchiveLibrary(archiveLibrary)
-                Set<Task> dependencies
+                Set<Task> dependencies = getTaskDependencies(artifact)
 
-                if (getTaskDependency(artifact) instanceof TaskDependency) {
-                    dependencies = artifact.buildDependencies.getDependencies()
-                } else {
-                    CachingTaskDependencyResolveContext context = new CachingTaskDependencyResolveContext()
-                    getTaskDependency(artifact).visitDependencies(context)
-                    if (context.queue.size() == 0) {
-                        dependencies = new HashSet<>()
-                    } else {
-                        dependencies = context.queue.getFirst().getDependencies()
-                    }
-                }
                 final def zipFolder = archiveLibrary.getRootFolder()
                 zipFolder.mkdirs()
                 def group = artifact.getModuleVersion().id.group.capitalize()
@@ -453,11 +437,8 @@ class VariantProcessor {
                     .withPathSensitivity(PathSensitivity.RELATIVE)
             inputs.files(mJarFiles).withPathSensitivity(PathSensitivity.RELATIVE)
         }
-        // Asm tasks enabled from AGP 8 version
-        if(FatUtils.isAGPVersion8AndAbove()){
-            mProject.tasks.named("transform${mVariant.name.capitalize()}ClassesWithAsm").configure {
-                dependsOn(mMergeClassTask)
-            }
+        mProject.tasks.named("transform${mVariant.name.capitalize()}ClassesWithAsm").configure {
+            dependsOn(mMergeClassTask)
         }
         extractAnnotationsTask.configure {
             mustRunAfter(mMergeClassTask)
